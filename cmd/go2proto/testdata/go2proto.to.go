@@ -242,6 +242,7 @@ func (x *Root) ToProto() *destpb.Root {
 		Key:             orZero(ptr(string(protoMust(x.Key.MarshalText())))),
 		OptionalTime:    setNil(timestamppb.New(orZero(x.OptionalTime.Ptr())), x.OptionalTime.Ptr()),
 		OptionalMessage: x.OptionalMessage.Ptr().ToProto(),
+		OptionsKey:      setNil(ptr(string(protoMust(orZero(x.OptionsKey.Ptr()).MarshalText()))), x.OptionsKey.Ptr()),
 	}
 }
 
@@ -298,6 +299,9 @@ func RootFromProto(v *destpb.Root) (out *Root, err error) {
 	}
 	if out.OptionalMessage, err = optionalR(result.From(MessageFromProto(v.OptionalMessage))).Result(); err != nil {
 		return nil, fmt.Errorf("OptionalMessage: %w", err)
+	}
+	if out.OptionsKey, err = optionalR(unmarshallText([]byte(v.OptionsKey), &out.OptionsKey)).Result(); err != nil {
+		return nil, fmt.Errorf("OptionsKey: %w", err)
 	}
 	return out, nil
 }
