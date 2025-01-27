@@ -172,26 +172,20 @@ type textUnmarshallable[T any] interface {
 	encoding.TextUnmarshaler
 }
 
-func unmarshallBinary[T any, TPtr binaryUnmarshallable[T]](v []byte, f TPtr) result.Result[*T] {
+func unmarshallBinary[T any, TPtr binaryUnmarshallable[T]](v []byte, f TPtr) (*T, error) {
 	var to T
 	toptr := (TPtr)(&to)
 
 	err := toptr.UnmarshalBinary(v)
-	if err != nil {
-		return result.Err[*T](err)
-	}
-	return result.Ok[*T](&to)
+	return &to, err
 }
 
-func unmarshallText[T any, TPtr textUnmarshallable[T]](v []byte, f TPtr) result.Result[*T] {
+func unmarshallText[T any, TPtr textUnmarshallable[T]](v []byte, f TPtr) (*T, error) {
 	var to T
 	toptr := (TPtr)(&to)
 
 	err := toptr.UnmarshalText(v)
-	if err != nil {
-		return result.Err[*T](err)
-	}
-	return result.Ok[*T](&to)
+	return &to, err
 }
 
 {{range $decl := .OrderedDecls }}
@@ -215,7 +209,7 @@ func {{ .Name }}FromProto(v *destpb.{{ .Name }}) (out *{{ .Name }}, err error) {
 	out = &{{ .Name }}{}
 
 {{- range $field := .Fields }}
-	if out.{{ $field.Name }}, err = {{ $field.FromProto }}.Result(); err != nil {
+	if out.{{ $field.Name }}, err = {{ $field.FromProto }}; err != nil {
 		return nil, fmt.Errorf("{{ $field.Name }}: %w", err)
 	}
 {{- end}}
