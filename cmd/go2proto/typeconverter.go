@@ -23,14 +23,26 @@ type ValueErr interface {
 }
 
 // SimpleExpr is an expression of a single simple underlying value.
+// simple expressions can be converted between pointer and nested values
 type SimpleExpr interface {
 	ConverterExpr
 	simpleExpr()
 }
 
+type SliceExpr interface {
+	ConverterExpr
+	sliceExpr()
+}
+
+// SingleExpr is an expression that can be assigned to a single variable
+type SingleExpr interface {
+	ConverterExpr
+	singleExpr()
+}
+
 // NoErrValue is (value, nil) pair
 type NoErrValue[T Pointer | Nested] struct {
-	Value SimpleExpr
+	Value SingleExpr
 }
 
 func (e *NoErrValue[T]) valueErr() {}
@@ -52,6 +64,8 @@ type BasicTypeConversionExpr struct {
 
 func (e *BasicTypeConversionExpr) simpleExpr() {}
 
+func (e *BasicTypeConversionExpr) singleExpr() {}
+
 func (e *BasicTypeConversionExpr) tagged() Nested { var k Nested; return k }
 
 func (e *BasicTypeConversionExpr) asCode() string {
@@ -64,6 +78,8 @@ type InputExpr[T Pointer | Nested] struct {
 }
 
 func (e *InputExpr[T]) simpleExpr() {}
+
+func (e *InputExpr[T]) singleExpr() {}
 
 func (e *InputExpr[T]) tagged() T { var k T; return k }
 
@@ -119,6 +135,8 @@ type PtrToNestedMethodExpr struct {
 
 func (e *PtrToNestedMethodExpr) simpleExpr() {}
 
+func (e *PtrToNestedMethodExpr) singleExpr() {}
+
 func (e *PtrToNestedMethodExpr) tagged() Nested { var k Nested; return k }
 
 func (e *PtrToNestedMethodExpr) asCode() string {
@@ -156,6 +174,8 @@ type PtrExpr struct {
 
 func (e *PtrExpr) simpleExpr() {}
 
+func (e *PtrExpr) singleExpr() {}
+
 func (e *PtrExpr) asCode() string {
 	return fmt.Sprintf("&(%s)", e.Underlying.asCode())
 }
@@ -171,44 +191,80 @@ type NestedExpr struct {
 
 func (e *NestedExpr) simpleExpr() {}
 
+func (e *NestedExpr) singleExpr() {}
+
 func (e *NestedExpr) asCode() string {
 	return fmt.Sprintf("*(%s)", e.Underlying.asCode())
 }
 
 func (e *NestedExpr) tagged() Nested { var k Nested; return k }
 
-func asPointer(exp SimpleExpr) interface {
-	SimpleExpr
-	Tagged[Pointer]
-} {
-	if e, ok := exp.(interface {
-		SimpleExpr
-		Tagged[Pointer]
-	}); ok {
-		return e
-	} else if e, ok := exp.(interface {
-		SimpleExpr
-		Tagged[Nested]
-	}); ok {
-		return &PtrExpr{Underlying: e}
-	}
-	panic("should not happen")
+type InputSliceExpr[T Pointer | Nested] struct {
+	Value string
 }
 
-func asNested(exp SimpleExpr) interface {
+func (e *InputSliceExpr[T]) singleExpr() {}
+
+func (e *InputSliceExpr[T]) sliceExpr() {}
+
+func (e *InputSliceExpr[T]) asCode() string {
+	return e.Value
+}
+
+func (e *InputSliceExpr[T]) tagged() Nested { var k T; return k }
+
+type SliceMapExpr struct {
+	Underlying  SliceExpr
+	MapExpr     func(i SimpleExpr) ConverterExpr
+	OutItemType string
+	InItemType  string
+}
+
+func (e *SliceMapExpr) singleExpr() {}
+
+func (e *SliceMapExpr) sliceExpr() {}
+
+func (e *SliceMapExpr) asCode() string {
+	return fmt.Sprintf("sliceMap(%s, func (v %s) %s { return %s })",
+		e.Underlying.asCode(),
+		e.InItemType,
+		e.OutItemType,
+		e.MapExpr(&InputExpr[Nested]{Value: "v"}).asCode(),
+	)
+}
+
+func asPointer(exp SimpleExpr) (interface {
+	SimpleExpr
+	Tagged[Pointer]
+}, error) {
+	if e, ok := exp.(interface {
+		SimpleExpr
+		Tagged[Pointer]
+	}); ok {
+		return e, nil
+	} else if e, ok := exp.(interface {
+		SimpleExpr
+		Tagged[Nested]
+	}); ok {
+		return &PtrExpr{Underlying: e}, nil
+	}
+	return nil, fmt.Errorf("can not cast %T as pointer", exp)
+}
+
+func asNested(exp SimpleExpr) (interface {
 	SimpleExpr
 	Tagged[Nested]
-} {
+}, error) {
 	if e, ok := exp.(interface {
 		SimpleExpr
 		Tagged[Nested]
 	}); ok {
-		return e
+		return e, nil
 	} else if e, ok := exp.(interface {
 		SimpleExpr
 		Tagged[Pointer]
 	}); ok {
-		return &NestedExpr{Underlying: e}
+		return &NestedExpr{Underlying: e}, nil
 	}
-	panic("should not happen")
+	return nil, fmt.Errorf("can not cast %T as nested", exp)
 }

@@ -185,7 +185,7 @@ func MessageFromProto(v *destpb.Message) (out *Message, err error) {
 	if out.Nested, err = NestedFromProto(v.Nested); err != nil {
 		return nil, fmt.Errorf("Nested: %w", err)
 	}
-	if out.RepeatedNested, err = NestedFromProto(v.RepeatedNested); err != nil {
+	if out.RepeatedNested, err = sliceMap(v.RepeatedNested, func(v *destpb.Nested) Nested { return NestedFromProto(&(v)) }), nil; err != nil {
 		return nil, fmt.Errorf("RepeatedNested: %w", err)
 	}
 	if err := out.Validate(); err != nil {
@@ -270,10 +270,10 @@ func RootFromProto(v *destpb.Root) (out *Root, err error) {
 	if out.OptionalMsg, err = MessageFromProto(v.OptionalMsg); err != nil {
 		return nil, fmt.Errorf("OptionalMsg: %w", err)
 	}
-	if out.RepeatedInt, err = int(v.RepeatedInt), nil; err != nil {
+	if out.RepeatedInt, err = sliceMap(v.RepeatedInt, func(v int64) int { return int(v) }), nil; err != nil {
 		return nil, fmt.Errorf("RepeatedInt: %w", err)
 	}
-	if out.RepeatedMsg, err = MessageFromProto(v.RepeatedMsg); err != nil {
+	if out.RepeatedMsg, err = sliceMap(v.RepeatedMsg, func(v *destpb.Message) *Message { return MessageFromProto(&(v)) }), nil; err != nil {
 		return nil, fmt.Errorf("RepeatedMsg: %w", err)
 	}
 	if out.URL, err = unmarshallBinary(v.Url, out.URL); err != nil {

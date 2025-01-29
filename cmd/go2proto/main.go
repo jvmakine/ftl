@@ -211,7 +211,7 @@ type Field struct {
 	ProtoType   string // The type of the field in the generated .proto file.
 	ProtoGoType string // The type of the field in the generated Go protobuf code. eg. int -> int64.
 
-	Proto SimpleExpr
+	Proto SingleExpr
 
 	Optional        bool
 	OptionalWrapper bool // optional as alecthomas/types/optional.Option
@@ -231,7 +231,7 @@ func (f Field) OriginTypeSignature() string {
 }
 
 type TypeConverter struct {
-	FromProto ConverterExpr
+	FromProto func(i SimpleExpr) ConverterExpr
 	ToProto   func(variable string) string
 
 	// ProtoPointer is true if the proto type is a pointer.
@@ -613,13 +613,21 @@ func (s *State) maybeExtractDecl(n types.Object, t types.Type) error {
 }
 
 func populateProtoExpr(_ *types.Named, field *Field) {
-	field.Proto = &InputExpr[Nested]{Value: "v." + field.EscapedName()}
+	if field.Repeated {
+		field.Proto = &InputSliceExpr[Nested]{Value: "v." + field.EscapedName()}
+	} else {
+		field.Proto = &InputExpr[Nested]{Value: "v." + field.EscapedName()}
+	}
 	if field.Optional ||
 		field.Kind == KindMessage ||
 		field.Kind == KindSumType ||
 		field.ProtoType == "google.protobuf.Timestamp" ||
 		field.ProtoType == "google.protobuf.Duration" {
-		field.Proto = &InputExpr[Pointer]{Value: "v." + field.EscapedName()}
+		if field.Repeated {
+			field.Proto = &InputSliceExpr[Pointer]{Value: "v." + field.EscapedName()}
+		} else {
+			field.Proto = &InputExpr[Pointer]{Value: "v." + field.EscapedName()}
+		}
 	}
 }
 
@@ -653,7 +661,9 @@ func (s *State) populateFields(decl *Message, n *types.Named) error {
 		}
 
 		populateProtoExpr(n, field)
-		s.populateConverters(field)
+		if err := s.populateConverters(field); err != nil {
+			return err
+		}
 
 		decl.Fields = append(decl.Fields, field)
 	}
@@ -686,17 +696,27 @@ func (f *Field) ToProto() string {
 }
 
 func (f *Field) FromProto() string {
-	expr := f.Converter.FromProto
+	var expr ConverterExpr
+	switch i := f.Proto.(type) {
+	case SliceExpr:
+		expr = &SliceMapExpr{
+			Underlying:  i,
+			OutItemType: f.OriginTypeSignature(),
+			InItemType:  f.ProtoGoType,
+			MapExpr:     f.Converter.FromProto,
+		}
+	case SimpleExpr:
+		expr = f.Converter.FromProto(i)
+	default:
+		panic(fmt.Errorf("unsupported type in FromProto: %T", f.Proto))
+	}
 	switch e := expr.(type) {
 	case interface {
-		SimpleExpr
+		SingleExpr
 		Tagged[Pointer]
 	}:
 		return (&NoErrValue[Pointer]{Value: e}).asCode()
-	case interface {
-		SimpleExpr
-		Tagged[Nested]
-	}:
+	case interface{ SingleExpr }:
 		return (&NoErrValue[Nested]{Value: e}).asCode()
 	case interface {
 		ValueErr
@@ -709,7 +729,7 @@ func (f *Field) FromProto() string {
 	}:
 		return e.asCode()
 	default:
-		panic(fmt.Sprintf("unsupported type: %T", e))
+		return e.asCode()
 	}
 
 	// inputs are result.Result[*T]
@@ -733,31 +753,48 @@ func (f *Field) FromProto() string {
 	// return input
 }
 
-func (s *State) populateConverters(field *Field) {
-	input := field.Proto
+func (s *State) populateConverters(field *Field) error {
 	if field.ProtoType == "google.protobuf.Timestamp" {
 		field.Converter = &TypeConverter{
-			FromProto: &PtrToNestedMethodExpr{
-				Underlying: asPointer(input),
-				Method:     "AsTime",
+			FromProto: func(i SimpleExpr) ConverterExpr {
+				u, err := asPointer(i)
+				if err != nil {
+					panic(err)
+				}
+				return &PtrToNestedMethodExpr{
+					Underlying: u,
+					Method:     "AsTime",
+				}
 			},
 			ToProto:      func(v string) string { return fmt.Sprintf("timestamppb.New(%s)", v) },
 			ProtoPointer: true,
 		}
 	} else if field.ProtoType == "google.protobuf.Duration" {
 		field.Converter = &TypeConverter{
-			FromProto: &PtrToNestedMethodExpr{
-				Underlying: asPointer(input),
-				Method:     "AsDuration",
+			FromProto: func(i SimpleExpr) ConverterExpr {
+				u, err := asPointer(i)
+				if err != nil {
+					panic(err)
+				}
+				return &PtrToNestedMethodExpr{
+					Underlying: u,
+					Method:     "AsDuration",
+				}
 			},
 			ToProto:      func(v string) string { return fmt.Sprintf("durationpb.New(%s)", v) },
 			ProtoPointer: true,
 		}
 	} else if field.Kind == KindMessage {
 		field.Converter = &TypeConverter{
-			FromProto: &PtrToPtrErrFunctionExpr{
-				Underlying: asPointer(input),
-				Function:   fmt.Sprintf("%sFromProto", field.OriginType),
+			FromProto: func(i SimpleExpr) ConverterExpr {
+				u, err := asPointer(i)
+				if err != nil {
+					panic(err)
+				}
+				return &PtrToPtrErrFunctionExpr{
+					Underlying: u,
+					Function:   fmt.Sprintf("%sFromProto", field.OriginType),
+				}
 			},
 			ToProto:             func(v string) string { return fmt.Sprintf("%s.ToProto()", v) },
 			ProtoPointer:        true,
@@ -765,35 +802,59 @@ func (s *State) populateConverters(field *Field) {
 		}
 	} else if field.Kind == KindEnum {
 		field.Converter = &TypeConverter{
-			FromProto: &NestedToNestedErrFunctionExpr{
-				Underlying: asNested(input),
-				Function:   fmt.Sprintf("%sFromProto", field.OriginType),
+			FromProto: func(i SimpleExpr) ConverterExpr {
+				u, err := asNested(i)
+				if err != nil {
+					panic(err)
+				}
+				return &NestedToNestedErrFunctionExpr{
+					Underlying: u,
+					Function:   fmt.Sprintf("%sFromProto", field.OriginType),
+				}
 			},
 			ToProto: func(v string) string { return fmt.Sprintf("ptr(%s.ToProto())", v) },
 		}
 	} else if field.Kind == KindTextMarshaler {
 		field.Converter = &TypeConverter{
-			FromProto: &NestedToPtrErrTypedFunction{
-				Underlying: &BasicTypeConversionExpr{Underlying: asNested(input), Type: "[]byte"},
-				Function:   "unmarshallText",
-				TypeExr:    &InputExpr[Pointer]{Value: "out." + field.Name},
+			FromProto: func(i SimpleExpr) ConverterExpr {
+				u, err := asNested(i)
+				if err != nil {
+					panic(err)
+				}
+				return &NestedToPtrErrTypedFunction{
+					Underlying: &BasicTypeConversionExpr{Underlying: u, Type: "[]byte"},
+					Function:   "unmarshallText",
+					TypeExr:    &InputExpr[Pointer]{Value: "out." + field.Name},
+				}
 			},
 			ToProto: func(v string) string { return fmt.Sprintf("ptr(string(protoMust(%s.MarshalText())))", v) },
 		}
 	} else if field.Kind == KindBinaryMarshaler {
 		field.Converter = &TypeConverter{
-			FromProto: &NestedToPtrErrTypedFunction{
-				Underlying: asNested(input),
-				Function:   "unmarshallBinary",
-				TypeExr:    &InputExpr[Pointer]{Value: "out." + field.Name},
+			FromProto: func(i SimpleExpr) ConverterExpr {
+				u, err := asNested(i)
+				if err != nil {
+					panic(err)
+				}
+				return &NestedToPtrErrTypedFunction{
+					Underlying: u,
+					Function:   "unmarshallBinary",
+					TypeExr:    &InputExpr[Pointer]{Value: "out." + field.Name},
+				}
 			},
 			ToProto: func(v string) string { return fmt.Sprintf("ptr(protoMust(%s.MarshalBinary()))", v) },
 		}
 	} else if field.Kind == KindSumType {
 		field.Converter = &TypeConverter{
-			FromProto: &PtrToPtrErrFunctionExpr{
-				Underlying: asPointer(input),
-				Function:   fmt.Sprintf("%sFromProto", field.OriginType),
+			FromProto: func(i SimpleExpr) ConverterExpr {
+				u, err := asPointer(i)
+				if err != nil {
+					panic(err)
+				}
+				return &PtrToPtrErrFunctionExpr{
+					Underlying: u,
+					Function:   fmt.Sprintf("%sFromProto", field.OriginType),
+				}
 			},
 			ToProto:             func(v string) string { return fmt.Sprintf("%sToProto(%s)", field.OriginType, v) },
 			ProtoPointer:        true,
@@ -805,19 +866,28 @@ func (s *State) populateConverters(field *Field) {
 				// FromProto: func(v string) string {
 				// 	return fmt.Sprintf("result.From(setNil(ptr(%s(orZero(%s))), %s), nil)", field.OriginType, v, v)
 				// },
-				FromProto: &InputExpr[Pointer]{Value: "nil"},
-				ToProto:   func(v string) string { return fmt.Sprintf("ptr(%s(%s))", field.ProtoGoType, v) },
+				FromProto: func(i SimpleExpr) ConverterExpr {
+					return &InputExpr[Pointer]{Value: "nil"}
+				},
+				ToProto: func(v string) string { return fmt.Sprintf("ptr(%s(%s))", field.ProtoGoType, v) },
 			}
 		} else {
 			field.Converter = &TypeConverter{
-				FromProto: &NoErrValue[Nested]{Value: &BasicTypeConversionExpr{
-					Underlying: asNested(input),
-					Type:       field.OriginType,
-				}},
+				FromProto: func(i SimpleExpr) ConverterExpr {
+					u, err := asNested(i)
+					if err != nil {
+						panic(err)
+					}
+					return &BasicTypeConversionExpr{
+						Underlying: u,
+						Type:       field.OriginType,
+					}
+				},
 				ToProto: func(v string) string { return fmt.Sprintf("ptr(%s(%s))", field.ProtoGoType, v) },
 			}
 		}
 	}
+	return nil
 }
 
 func (s *State) extractSumType(obj types.Object, i *types.Interface) error {
